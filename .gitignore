@@ -1,0 +1,14 @@
+# Contenido del archivo .gitignore
+
+# Ignorar dependencias (ejemplo para Node.js)
+node_modules/
+
+# Ignorar entorno virtual (ejemplo para Python)
+venv/
+notasenv/
+
+# Ignorar archivos de entorno
+.env
+
+# Ignorar el directorio de logs
+logs/

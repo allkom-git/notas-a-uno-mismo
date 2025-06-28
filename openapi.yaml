@@ -1,0 +1,50 @@
+openapi: 3.0.1
+info:
+  title: API de Notas a Uno Mismo
+  version: "1.0"
+servers:
+  - url: http://20.75.80.14:8000
+paths:
+  /nota:
+    post:
+      summary: Guardar una nota
+      operationId: guardarNota
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/Nota'
+      responses:
+        '200':
+          description: Nota guardada correctamente
+components:
+  schemas:
+    Nota:
+      type: object
+      properties:
+        texto_original:
+          type: string
+        resumen:
+          type: string
+        emocion:
+          type: string
+        tags:
+          type: array
+          items:
+            type: string
+        lat:
+          type: number
+          nullable: true
+        lon:
+          type: number
+          nullable: true
+        fecha:
+          type: string
+          nullable: true
+      required:
+        - texto_original
+        - resumen
+        - emocion
+        - tags
+
