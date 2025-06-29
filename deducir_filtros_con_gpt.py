@@ -5,7 +5,7 @@ from dotenv import load_dotenv
 load_dotenv()
 openai_client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
-def deducir_filtros_con_gpt(pregunta: str) -> dict:
+def analizar_intencion_con_gpt(pregunta: str) -> dict:
     system_prompt = """Sos un asistente que ayuda a traducir una pregunta de un usuario sobre sus notas personales a filtros para búsqueda en una base de datos.
 
 Dado el texto de una pregunta, devolvés un JSON con alguno de los siguientes campos si se pueden deducir:

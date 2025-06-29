@@ -12,7 +12,7 @@ from gpt_utils import completar_campos_con_openai, deducir_ubicacion_textual_des
 from datetime import datetime, timedelta
 from mapa import router as mapa_router
 from geo_localizacion_ai import geocodificar_coordenadas, enriquecer_metadata_con_openai
-from deducir_filtros_con_gpt import deducir_filtros_con_gpt
+from deducir_filtros_con_gpt import analizar_intencion_con_gpt
 
 load_dotenv()
 
@@ -205,7 +205,9 @@ def buscar_notas(email: str = Query(...), texto: str = Query(...), offset: float
         return {"resultados": [], "resumen": "No se encontró el usuario."}
 
     user_id = user['id']
-    k = deducir_top_k_desde_pregunta(texto)
+#   k = deducir_top_k_desde_pregunta(texto)
+    intencion = analizar_intencion_con_gpt(texto)
+    k = intencion.get("top_k", 15)
 
     response = openai_client.embeddings.create(
         input=texto,
@@ -285,5 +287,16 @@ Si la pregunta es genérica o busca consejos, respondé con una respuesta más a
     db.close()
 
     return {"resultados": notas, "resumen": resumen}
+    
+    notas_detalladas = []
+    for match in resultados.matches:
+        meta = match.metadata or {}
+        notas_detalladas.append({
+            "id": match.id,
+            "namespace": resultados.namespace or "__default__",
+            "metadata": meta,
+            "score": match.score  # opcional
+        })
+    return {"resultados": notas_detalladas, "resumen": resumen}
 
 app.include_router(mapa_router)
