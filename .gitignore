@@ -12,3 +12,6 @@ notasenv/
 
 # Ignorar el directorio de logs
 logs/
+
+#www direcrtorio temporal donde desjo arrhivos del frontend
+www/
