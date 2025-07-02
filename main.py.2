@@ -1,6 +1,6 @@
 from fastapi import FastAPI, Query
 from pydantic import BaseModel
-from datetime import datetime, time, timedelta, date
+from datetime import datetime, time, timedelta
 import os
 from dotenv import load_dotenv
 from pinecone import Pinecone
@@ -12,7 +12,6 @@ from gpt_utils import completar_campos_con_openai, deducir_ubicacion_textual_des
 from mapa import router as mapa_router
 from geo_localizacion_ai import geocodificar_coordenadas, enriquecer_metadata_con_openai
 from deducir_filtros_con_gpt import analizar_intencion_con_gpt
-import re
 
 load_dotenv()
 
@@ -136,11 +135,6 @@ def notas_por_email(email: str = Query(...)):
     user_id = user['id']
     cursor.execute("SELECT * FROM notas WHERE user_id = %s ORDER BY fecha DESC, hora DESC", (user_id,))
     notas = cursor.fetchall()
-    #print("📌 Fechas devueltas desde MySQL:", [n['fecha'] for n in notas])
-
-    if not notas:
-        return {"resultados": [], "resumen": "No se encontraron notas que coincidan con los filtros."}
-
     cursor.close()
     db.close()
     return {"notas": notas}
@@ -177,6 +171,7 @@ def convertir_fecha_hora(nota, offset):
         print(f"⚠️ Error al convertir nota ID {nota.get('id')} → {e}")
         return "(fecha inválida)"
 
+
 @app.get("/buscar-notas")
 def buscar_notas(email: str = Query(...), texto: str = Query(...), offset: float = Query(-3.0)):
     db = get_db_connection()
@@ -191,65 +186,31 @@ def buscar_notas(email: str = Query(...), texto: str = Query(...), offset: float
     user_id = user['id']
     intencion = analizar_intencion_con_gpt(texto)
     k = intencion.get("top_k", 15)
-    filtros = intencion.get("filtros", {})
-
-    # Añadimos detección básica de fecha textual si no hay fecha deducida
-    if "fecha" not in filtros:
-        texto_lower = texto.lower()
-        hoy = date.today()
-        if "ayer" in texto_lower:
-            filtros["fecha"] = str(hoy - timedelta(days=1))
-        elif "hoy" in texto_lower:
-            filtros["fecha"] = str(hoy)
-        elif m := re.search(r"(\d{1,2}) de julio", texto_lower):
-            dia = int(m.group(1))
-            filtros["fecha"] = f"2025-07-{dia:02d}"
-
-    query = "SELECT * FROM notas WHERE user_id = %s"
-    params = [user_id]
-
-    if "fecha" in filtros:
-        query += " AND fecha = %s"
-        params.append(filtros["fecha"])
-    if "emocion" in filtros:
-        query += " AND emocion = %s"
-        params.append(filtros["emocion"])
-    if "tags" in filtros and filtros["tags"]:
-        for tag in filtros["tags"]:
-            query += " AND tags LIKE %s"
-            params.append(f"%{tag}%")
-
-    query += " ORDER BY fecha DESC, hora DESC LIMIT 100"
-    cursor.execute(query, tuple(params))
-    notas = cursor.fetchall()
-
-    print("📌 Fechas devueltas desde MySQL:", [n['fecha'] for n in notas])
-
-    if not notas:
-        return {"resultados": [], "resumen": "No se encontraron notas que coincidan con los filtros."}
 
     response = openai_client.embeddings.create(
         input=texto,
         model="text-embedding-3-small"
     )
     embedding = response.data[0].embedding
+    resultados = index.query(
+        vector=embedding,
+        top_k=k,
+        include_metadata=True,
+        filter={"user_id": str(user_id)}
+    )
+    ids = [match['id'] for match in resultados.matches]
+    if not ids:
+        return {"resultados": [], "resumen": "No se encontraron notas relevantes."}
 
-    resultados = []
-    for nota in notas:
-        nota_vector = index.fetch([nota['pinecone_id']]).vectors.get(nota['pinecone_id'])
-        if nota_vector:
-            similarity = sum(e * n for e, n in zip(embedding, nota_vector['values']))
-            nota["score"] = similarity
-            resultados.append(nota)
-
-    resultados.sort(key=lambda x: x["score"], reverse=True)
-    top_resultados = resultados[:k]
+    placeholders = ','.join(['%s'] * len(ids))
+    cursor.execute(f"SELECT * FROM notas WHERE pinecone_id IN ({placeholders})", tuple(ids))
+    notas = cursor.fetchall()
 
     texto_notas = "\n\n".join([
         f"- {convertir_fecha_hora(n, offset)}"
         + (f" [{n['emocion']}]" if n.get('emocion') else "")
         + f": {n['texto']}"
-        for n in top_resultados
+        for n in notas
     ])
 
     fecha_actual = (datetime.utcnow() + timedelta(hours=offset)).strftime("%Y-%m-%d")
@@ -267,7 +228,15 @@ Pregunta: {texto}
 
 Respondé en un tono conversacional, como si fueras un asistente personal que conoce bien a quien escribe estas notas.
 
-Si la pregunta incluye múltiples temas, podés agrupar por emoción, tags o día. Si menciona "más usados" o "resumen", incluí estadísticas también.
+Si la pregunta es concreta, respondé en una o dos frases con la mejor respuesta directa posible, basada exclusivamente en el contenido de las notas anteriores.
+
+Si la pregunta se refiere a un estado emocional o personal actual (por ejemplo: "¿estoy contento ahora?", "¿me sentía bien hoy?", etc.), seguí estas reglas:
+- Si hay una nota con emoción compatible en las últimas 12 horas, asumí que ese es su estado actual.
+- Si no hay notas recientes, pero hay una nota anterior que refleja un estado emocional claro, podés mencionarla como referencia. Por ejemplo: "No hay notas recientes, pero en la última nota dijiste que estabas contento."
+
+Si se puede inferir una persona, un lugar o una acción concreta, respondé de forma clara y directa.
+
+Si la pregunta es genérica o busca consejos, respondé con una respuesta más amplia, pero siempre basada en las notas.
 """
 
     chat_response = openai_client.chat.completions.create(
@@ -281,7 +250,8 @@ Si la pregunta incluye múltiples temas, podés agrupar por emoción, tags o dí
 
     ahora = datetime.now()
     cursor.execute("""
-        INSERT INTO consultas (user_id, pregunta, respuesta, fecha, hora)        VALUES (%s, %s, %s, %s, %s)
+        INSERT INTO consultas (user_id, pregunta, respuesta, fecha, hora)
+        VALUES (%s, %s, %s, %s, %s)
     """, (
         user_id,
         texto,
@@ -294,7 +264,7 @@ Si la pregunta incluye múltiples temas, podés agrupar por emoción, tags o dí
     cursor.close()
     db.close()
 
-    return {"resultados": top_resultados, "resumen": resumen}
+    return {"resultados": notas, "resumen": resumen}
 
 
 app.include_router(mapa_router)
