@@ -21,6 +21,9 @@ def geocodificar_coordenadas(lat: float, lon: float) -> str:
         return "Ubicación desconocida"
 
 def enriquecer_metadata_con_openai(texto: str, ubicacion: str = None):
+    """
+    Enriquece el texto con metadata y devuelve también los tokens usados
+    """
     prompt = f"""Dado el siguiente texto:
 
 {texto}
@@ -40,17 +43,20 @@ Tags: ...
 Título: ...
 Resumen: ...
 """
+    
     completion = client.chat.completions.create(
         model="gpt-3.5-turbo",
         messages=[{"role": "user", "content": prompt}]
     )
+    
     lines = completion.choices[0].message.content.strip().split("\n")
     result = {
         "emocion": None,
         "categoria": None,
         "tags": [],
         "titulo": None,
-        "resumen": None
+        "resumen": None,
+        "tokens_usados": completion.usage.total_tokens  # 📊 Agregar tokens
     }
 
     for line in lines:
@@ -64,4 +70,5 @@ Resumen: ...
             result["titulo"] = line.split(":")[-1].strip()
         elif "Resumen" in line:
             result["resumen"] = line.split(":")[-1].strip()
+    
     return result

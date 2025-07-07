@@ -11,6 +11,41 @@ function formatearHora(hora) {
   return hora || "??:??";
 }
 
+// 📊 Función para mostrar información de tokens
+function mostrarTokens(tokens, contenedorId) {
+  const contenedor = document.getElementById(contenedorId);
+  if (!tokens || !contenedor) return;
+  
+  let html = '<div class="alert alert-info mt-2">';
+  html += '<small><strong>🔢 Tokens usados:</strong><br>';
+  
+  for (const [tipo, cantidad] of Object.entries(tokens)) {
+    if (tipo !== 'total') {
+      html += `${tipo}: ${cantidad} | `;
+    }
+  }
+  html += `<strong>Total: ${tokens.total}</strong></small></div>`;
+  
+  contenedor.innerHTML = html;
+}
+
+// 💰 Función para calcular costo estimado
+function calcularCosto(tokens) {
+  // Precios por 1K tokens (julio 2025)
+  const precios = {
+    "gpt-3.5-turbo": { input: 0.0005, output: 0.0015 },
+    "gpt-4": { input: 0.03, output: 0.06 },
+    "text-embedding-3-small": 0.00002
+  };
+  
+  // Estimación (asumiendo 50% input, 50% output para chat)
+  const costoEmbedding = (tokens.embedding || 0) * precios["text-embedding-3-small"] / 1000;
+  const costoChat = ((tokens.enriquecimiento || 0) + (tokens.resumen_final || 0)) * 
+                   (precios["gpt-4"].input + precios["gpt-4"].output) / 2000;
+  
+  return (costoEmbedding + costoChat).toFixed(6);
+}
+
 document.addEventListener("DOMContentLoaded", () => {
   const emailGuardado = localStorage.getItem("user_email");
   const sesionInfo = document.getElementById("sesionInfo");
@@ -62,9 +97,13 @@ document.addEventListener("DOMContentLoaded", () => {
     notaForm.addEventListener("submit", async (e) => {
       e.preventDefault();
       const fechaManualInput = document.getElementById("fechaManual");
-console.log("⏱ Fecha manual DOM:", fechaManualInput);
-console.log("📤 Valor capturado:", fechaManualInput?.value);
-const payload = {
+      const resultadoDiv = document.getElementById("resultado");
+      
+      // Limpiar resultados anteriores
+      resultadoDiv.innerHTML = "⏳ Guardando nota...";
+      document.getElementById("tokensGuardar").innerHTML = "";
+      
+      const payload = {
         user_email: emailGuardado,
         texto: document.getElementById("texto").value.trim(),
         emocion: document.getElementById("emocion").value.trim() || undefined,
@@ -83,14 +122,20 @@ const payload = {
           body: JSON.stringify(payload),
         });
         const data = await res.json();
+        
         if (res.ok && data.status === "ok") {
-          document.getElementById("resultado").textContent = "✅ Nota guardada con éxito.";
+          const costo = calcularCosto(data.tokens_usados || {});
+          resultadoDiv.innerHTML = `
+            ✅ Nota guardada con éxito.
+            <small class="text-muted d-block">💰 Costo estimado: $${costo} USD</small>
+          `;
+          mostrarTokens(data.tokens_usados, "tokensGuardar");
           notaForm.reset();
         } else {
-          document.getElementById("resultado").textContent = "❌ Error al guardar la nota.";
+          resultadoDiv.textContent = "❌ Error al guardar la nota.";
         }
       } catch (err) {
-        document.getElementById("resultado").textContent = "⚠️ Error al conectar con el servidor.";
+        resultadoDiv.textContent = "⚠️ Error al conectar con el servidor.";
       }
     });
   }
@@ -126,18 +171,37 @@ const payload = {
     const offsetHoras = -offsetMin / 60;
 
     contenedor.innerHTML = "🔎 Buscando...";
+    document.getElementById("tokensBusqueda").innerHTML = "";
+    
     try {
       const res = await fetch(
         `https://notasia.1963.com.ar/buscar-notas?email=${encodeURIComponent(emailGuardado)}&texto=${encodeURIComponent(texto)}&offset=${offsetHoras}`
       );
       const data = await res.json();
       contenedor.innerHTML = "";
+      
+      // 📊 Mostrar información de tokens
+      if (data.tokens_usados) {
+        const costo = calcularCosto(data.tokens_usados);
+        mostrarTokens(data.tokens_usados, "tokensBusqueda");
+        
+        // Agregar costo al final del contenedor de tokens
+        const tokensDiv = document.getElementById("tokensBusqueda");
+        if (tokensDiv.innerHTML) {
+          tokensDiv.innerHTML = tokensDiv.innerHTML.replace(
+            '</div>', 
+            `<br><strong>💰 Costo estimado: $${costo} USD</strong></div>`
+          );
+        }
+      }
+      
       if (data.resumen) {
         const resumen = document.createElement("div");
-        resumen.className = "alert alert-info";
+        resumen.className = "alert alert-success";
         resumen.innerHTML = `<strong>🧠 GPT dice:</strong><br>${data.resumen}`;
         contenedor.appendChild(resumen);
       }
+      
       if (data.resultados && data.resultados.length > 0) {
         data.resultados.forEach(nota => {
           const div = document.createElement("div");
@@ -160,6 +224,7 @@ const payload = {
                   <li><strong>Ubicación:</strong> ${nota.ubicacion_textual || "—"}</li>
                   <li><strong>Tags:</strong> ${tags || "—"}</li>
                   <li><strong>Resumen:</strong> ${nota.resumen || "—"}</li>
+                  <li><strong>Score:</strong> ${nota.score?.toFixed(3) || "—"}</li>
                 </ul>
               </div>
             </details>

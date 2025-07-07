@@ -6,6 +6,9 @@ load_dotenv()
 openai_client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
 def analizar_intencion_con_gpt(pregunta: str) -> dict:
+    """
+    Analiza la intención de una pregunta y devuelve filtros + tokens usados
+    """
     system_prompt = """Sos un asistente que ayuda a traducir una pregunta de un usuario sobre sus notas personales a filtros para búsqueda en una base de datos.
 
 Dado el texto de una pregunta, devolvés un JSON con alguno de los siguientes campos si se pueden deducir:
@@ -35,10 +38,23 @@ Solo devolvés campos si hay una inferencia clara. Si no hay nada claro, devolv�
         # Intentar parsear como JSON
         import json
         filtros = json.loads(contenido)
+        
         if isinstance(filtros, dict):
-            return filtros
+            return {
+                "filtros": filtros,
+                "top_k": filtros.get("top_k", 15),
+                "tokens_usados": response.usage.total_tokens  # 📊 Agregar tokens
+            }
         else:
-            return {"top_k": 15}
+            return {
+                "filtros": {},
+                "top_k": 15,
+                "tokens_usados": response.usage.total_tokens
+            }
     except Exception as e:
         print(f"Error al deducir filtros con GPT: {e}")
-        return {"top_k": 15}
+        return {
+            "filtros": {},
+            "top_k": 15,
+            "tokens_usados": 0
+        }

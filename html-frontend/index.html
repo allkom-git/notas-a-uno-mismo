@@ -37,7 +37,7 @@
 <div class="tab-content pt-4">
 <div class="tab-pane fade show active" id="nueva" role="tabpanel">
 <form id="notaForm">
-<div class="mb-2" id="resultado"></div><div class="mb-3">
+<div class="mb-3">
 <label class="form-label" for="texto">Tu nota</label>
 <textarea class="form-control" id="texto" required="" rows="4"></textarea>
 </div>
@@ -50,7 +50,6 @@
 <input id="longitud" type="hidden"/>
 <div class="mb-3 text-muted" id="geo-status"></div>
 <button class="btn btn-primary" type="submit">💾 Guardar Nota</button>
-
 
 <button class="btn btn-link p-0" id="toggleOpciones" onclick="toggleOpcionesAvanzadas()" type="button">+ Más opciones</button>
 <div id="opcionesAvanzadas" style="display:none">
@@ -73,6 +72,8 @@
 </div>
 </form>
 <div class="mt-3" id="resultado"></div>
+<!-- 📊 Contenedor para tokens al guardar -->
+<div id="tokensGuardar"></div>
 </div>
 <div class="tab-pane fade" id="historial" role="tabpanel">
 <button class="btn btn-secondary" id="cargarHistorial">📂 Ver Notas</button>
@@ -84,6 +85,8 @@
 <textarea class="form-control" id="textoBuscar" rows="3"></textarea>
 </div>
 <button class="btn btn-info" id="buscarNotas">🔎 Buscar</button>
+<!-- 📊 Contenedor para tokens en búsqueda -->
+<div id="tokensBusqueda"></div>
 <div class="mt-3" id="resultadoBusqueda"></div>
 </div>
 <div class="tab-pane fade" id="mapa" role="tabpanel">
