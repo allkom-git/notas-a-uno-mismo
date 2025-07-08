@@ -13,6 +13,11 @@ from mapa import router as mapa_router
 from geo_localizacion_ai import geocodificar_coordenadas, enriquecer_metadata_con_openai
 from deducir_filtros_con_gpt import analizar_intencion_con_gpt
 import re
+import secrets
+import smtplib
+import random
+from email.mime.text import MIMEText
+from email.mime.multipart import MIMEMultipart
 
 load_dotenv()
 
@@ -42,6 +47,15 @@ class NotaRequest(BaseModel):
     longitud: float = None
     fecha_manual: str = None
     hora_manual: str = None
+
+
+class CodigoRequest(BaseModel):
+    email: str
+
+
+class VerificarCodigoRequest(BaseModel):
+    email: str
+    codigo: str
 
 
 def detectar_filtros_temporales(texto: str, offset_horas: float = -3.0) -> dict:
@@ -200,24 +214,42 @@ def guardar_nota(data: NotaRequest):
 
 @app.get("/notas-por-email")
 def notas_por_email(email: str = Query(...)):
+    print(f"🔍 Solicitando notas para email: {email}")
+    
     db = get_db_connection()
     cursor = db.cursor(dictionary=True)
-    cursor.execute("SELECT * FROM usuarios WHERE email = %s", (email,))
-    user = cursor.fetchone()
-    if not user:
+    
+    try:
+        cursor.execute("SELECT * FROM usuarios WHERE email = %s", (email,))
+        user = cursor.fetchone()
+        if not user:
+            print(f"❌ Usuario no encontrado: {email}")
+            cursor.close()
+            db.close()
+            return {"notas": []}
+        
+        user_id = user['id']
+        print(f"✅ Usuario encontrado: ID {user_id}")
+        
+        cursor.execute("SELECT * FROM notas WHERE user_id = %s ORDER BY fecha DESC, hora DESC", (user_id,))
+        notas = cursor.fetchall()
+        
+        print(f"📊 Encontradas {len(notas)} notas")
+        if notas:
+            print(f"📝 Primera nota: ID={notas[0]['id']}, fecha={notas[0]['fecha']}")
+
+        if not notas:
+            return {"notas": []}
+
         cursor.close()
         db.close()
-        return {"notas": []}
-    user_id = user['id']
-    cursor.execute("SELECT * FROM notas WHERE user_id = %s ORDER BY fecha DESC, hora DESC", (user_id,))
-    notas = cursor.fetchall()
-
-    if not notas:
-        return {"resultados": [], "resumen": "No se encontraron notas que coincidan con los filtros."}
-
-    cursor.close()
-    db.close()
-    return {"notas": notas}
+        return {"notas": notas}
+        
+    except Exception as e:
+        print(f"💥 Error en notas-por-email: {e}")
+        cursor.close()
+        db.close()
+        return {"error": str(e), "notas": []}
 
 
 def convertir_fecha_hora(nota, offset):
@@ -338,15 +370,36 @@ def buscar_notas(email: str = Query(...), texto: str = Query(...), offset: float
         
         print(f"📊 Resultados Pinecone: {len(resultados_pinecone.matches)} notas encontradas")
         
+        # 🔍 Debug: Mostrar algunos matches de ejemplo
+        if resultados_pinecone.matches:
+            for i, match in enumerate(resultados_pinecone.matches[:3]):
+                print(f"   Match {i+1}: ID={match.id}, Score={match.score:.3f}")
+                print(f"      Metadata: user_id={match.metadata.get('user_id')}, fecha={match.metadata.get('fecha')}")
+        
         if not resultados_pinecone.matches:
+            # 🔍 Debug: Probar búsqueda sin filtros temporales para ver si el problema son los filtros
+            print("🔍 Probando búsqueda sin filtros temporales...")
+            filtros_sin_fecha = {"user_id": {"$eq": str(user_id)}}
+            resultados_sin_filtro = index.query(
+                vector=embedding,
+                top_k=10,
+                include_metadata=True,
+                filter=filtros_sin_fecha
+            )
+            print(f"📊 Sin filtros temporales: {len(resultados_sin_filtro.matches)} notas encontradas")
+            if resultados_sin_filtro.matches:
+                for match in resultados_sin_filtro.matches[:3]:
+                    print(f"   Nota disponible: fecha={match.metadata.get('fecha')}, user_id={match.metadata.get('user_id')}")
+            
             return {
                 "resultados": [], 
-                "resumen": "No se encontraron notas que coincidan con los filtros temporales y de contenido.",
+                "resumen": f"No se encontraron notas que coincidan con los filtros temporales. Hay {len(resultados_sin_filtro.matches)} notas totales disponibles.",
                 "tokens_usados": tokens_usados,
                 "debug_info": {
                     "filtros_aplicados": filtros_pinecone,
                     "filtros_temporales": filtros_temporales,
-                    "offset_horas": offset
+                    "offset_horas": offset,
+                    "notas_sin_filtro": len(resultados_sin_filtro.matches) if 'resultados_sin_filtro' in locals() else 0
                 }
             }
 
@@ -433,9 +486,24 @@ Notas encontradas ({len(resultados)} notas):
 
 Pregunta: {texto}
 
-Respondé en un tono conversacional, como si fueras un asistente personal que conoce bien a quien escribe estas notas.
+INSTRUCCIONES DE FORMATO:
+• Respondé en un tono conversacional y empático, como un asistente personal
+• Usa emojis apropiados para hacer la respuesta más visual y amigable
+• Si la pregunta pide listas o bullets, usa "•" para cada elemento
+• Organiza la información con secciones claras usando **negritas** para títulos
+• Para actividades, usa formato: "• **HH:MM** - Descripción [😊 Emoción]"
+• Si hay múltiples días, agrupa por fecha con títulos como "🗓️ **[Fecha]:**"
+• Al final, siempre incluye una sección "📊 **Resumen:**" con insights o análisis
+• Si mencionas estadísticas, usa formato visual: "📈 Total: X notas | 😊 Emoción principal: Y"
 
-Si la pregunta incluye múltiples temas, podés agrupar por emoción, tags o día. Si menciona "más usados" o "resumen", incluí estadísticas también.
+EJEMPLO DE FORMATO:
+🗓️ **Lo que hiciste ayer:**
+
+• **14:30** - Reunión de trabajo [😊 Productivo]
+• **16:00** - Llamada con cliente [🤔 Concentrado]
+
+📊 **Resumen:**
+Fue un día enfocado en actividades laborales con buena productividad.
 """
 
         # 🧠 Resumen final con GPT
@@ -493,4 +561,280 @@ Si la pregunta incluye múltiples temas, podés agrupar por emoción, tags o dí
     }
 
 
+def enviar_codigo_por_email(email: str, codigo: str):
+    """
+    Envía código de verificación por email usando Gmail SMTP
+    """
+    try:
+        email_user = os.getenv("EMAIL_USER")
+        email_password = os.getenv("EMAIL_PASSWORD")
+        
+        if not email_user or not email_password:
+            raise Exception("Credenciales de email no configuradas")
+        
+        # HTML del email con código grande y visible
+        html_content = f"""
+        <!DOCTYPE html>
+        <html>
+        <head>
+            <meta charset="UTF-8">
+            <title>Tu código de verificación</title>
+        </head>
+        <body style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px;">
+            <div style="background: linear-gradient(135deg, #28a745 0%, #20c997 100%); color: white; padding: 30px; text-align: center; border-radius: 10px;">
+                <h1>🔢 Tu código de verificación</h1>
+                <p>Accede a tus notas personales</p>
+            </div>
+            
+            <div style="padding: 30px; background: #f8f9fa; border-radius: 0 0 10px 10px; text-align: center;">
+                <p>¡Hola! 👋</p>
+                <p>Tu código de verificación es:</p>
+                
+                <div style="background: #ffffff; border: 3px solid #28a745; border-radius: 10px; 
+                            padding: 20px; margin: 20px 0; display: inline-block;">
+                    <div style="font-size: 32px; font-weight: bold; letter-spacing: 5px; 
+                                color: #28a745; font-family: 'Courier New', monospace;">
+                        {codigo}
+                    </div>
+                </div>
+                
+                <p><strong>Ingresa este código en la aplicación para acceder.</strong></p>
+                <p><small>⏰ Este código expira en 10 minutos por seguridad.</small></p>
+                <p><small>🔒 Si no solicitaste este acceso, ignora este email.</small></p>
+            </div>
+        </body>
+        </html>
+        """
+        
+        # Crear mensaje
+        msg = MIMEMultipart('alternative')
+        msg['From'] = email_user
+        msg['To'] = email
+        msg['Subject'] = f"🔢 Tu código de verificación: {codigo}"
+        
+        # Versión texto plano
+        texto_plano = f"""
+        ¡Hola!
+        
+        Tu código de verificación es: {codigo}
+        
+        Ingresa este código en la aplicación para acceder a tus notas.
+        
+        ⏰ Este código expira en 10 minutos
+        🔒 Si no solicitaste este acceso, ignora este email.
+        """
+        
+        msg.attach(MIMEText(texto_plano, 'plain', 'utf-8'))
+        msg.attach(MIMEText(html_content, 'html', 'utf-8'))
+        
+        # Enviar
+        server = smtplib.SMTP('smtp.gmail.com', 587)
+        server.starttls()
+        server.login(email_user, email_password)
+        server.send_message(msg)
+        server.quit()
+        
+        print(f"✅ Código enviado a {email}: {codigo}")
+        
+    except Exception as e:
+        print(f"❌ Error enviando email: {e}")
+        raise Exception(f"No se pudo enviar el email: {str(e)}")
+
+
+@app.post("/enviar-codigo")
+def enviar_codigo(data: CodigoRequest):
+    """
+    Genera y envía un código de 6 dígitos al email del usuario
+    """
+    email = data.email.lower().strip()
+    
+    if not email or "@" not in email:
+        return {"status": "error", "message": "Email inválido"}
+    
+    # Generar código de 6 dígitos
+    codigo = f"{random.randint(100000, 999999)}"
+    expires_at = datetime.utcnow() + timedelta(minutes=10)
+    
+    db = get_db_connection()
+    cursor = db.cursor()
+    
+    try:
+        # Invalidar códigos anteriores para este email
+        cursor.execute("""
+            UPDATE verification_codes 
+            SET used = TRUE 
+            WHERE email = %s AND used = FALSE
+        """, (email,))
+        
+        # Crear nuevo código
+        cursor.execute("""
+            INSERT INTO verification_codes (email, code, expires_at) 
+            VALUES (%s, %s, %s)
+        """, (email, codigo, expires_at))
+        
+        db.commit()
+        
+        # Enviar email
+        enviar_codigo_por_email(email, codigo)
+        
+        print(f"🔢 Código creado para {email}: {codigo}")
+        
+        return {
+            "status": "ok",
+            "message": f"Código de verificación enviado a {email}. Revisa tu bandeja de entrada."
+        }
+        
+    except Exception as e:
+        print(f"❌ Error enviando código: {e}")
+        return {"status": "error", "message": "Error enviando el código. Intenta nuevamente."}
+    
+    finally:
+        cursor.close()
+        db.close()
+
+
+@app.post("/verificar-codigo")
+def verificar_codigo(data: VerificarCodigoRequest):
+    """
+    Valida el código de verificación y crea una sesión
+    """
+    email = data.email.lower().strip()
+    codigo = data.codigo.strip()
+    
+    if not email or not codigo:
+        return {"status": "error", "message": "Email y código requeridos"}
+    
+    if len(codigo) != 6 or not codigo.isdigit():
+        return {"status": "error", "message": "El código debe tener 6 dígitos"}
+    
+    db = get_db_connection()
+    cursor = db.cursor(dictionary=True)
+    
+    try:
+        # Verificar código
+        cursor.execute("""
+            SELECT email, expires_at, used 
+            FROM verification_codes 
+            WHERE email = %s AND code = %s
+            ORDER BY created_at DESC
+            LIMIT 1
+        """, (email, codigo))
+        
+        verification_code = cursor.fetchone()
+        
+        if not verification_code:
+            return {"status": "error", "message": "Código inválido"}
+        
+        if verification_code['used']:
+            return {"status": "error", "message": "Código ya utilizado"}
+        
+        if datetime.utcnow() > verification_code['expires_at']:
+            return {"status": "error", "message": "Código expirado. Solicita uno nuevo"}
+        
+        # ✅ Código válido - crear sesión
+        # Marcar código como usado
+        cursor.execute("""
+            UPDATE verification_codes 
+            SET used = TRUE 
+            WHERE email = %s AND code = %s
+        """, (email, codigo))
+        
+        # Buscar o crear usuario
+        cursor.execute("SELECT id FROM usuarios WHERE email = %s", (email,))
+        user = cursor.fetchone()
+        if not user:
+            cursor.execute(
+                "INSERT INTO usuarios (nombre, email) VALUES (%s, %s)", 
+                (email, email)
+            )
+            db.commit()
+        
+        # Crear nueva sesión (30 días)
+        session_token = secrets.token_urlsafe(32)
+        expires_at = datetime.utcnow() + timedelta(days=30)
+        
+        cursor.execute("""
+            INSERT INTO sessions (email, session_token, expires_at) 
+            VALUES (%s, %s, %s)
+        """, (email, session_token, expires_at))
+        
+        db.commit()
+        
+        print(f"✅ Sesión creada para {email}, expira en 30 días")
+        
+        return {
+            "status": "ok",
+            "message": "Código verificado correctamente",
+            "session_token": session_token,
+            "email": email,
+            "expires_at": expires_at.isoformat(),
+            "expires_in_days": 30
+        }
+        
+    except Exception as e:
+        print(f"❌ Error verificando código: {e}")
+        return {"status": "error", "message": "Error interno. Intenta nuevamente."}
+    
+    finally:
+        cursor.close()
+        db.close()
+
+
+@app.get("/session-info")
+def session_info():
+    """
+    Endpoint para verificar si una sesión está activa (para validación en frontend)
+    """
+    return {"status": "ok", "message": "Endpoint para verificar sesión"}
+
+
+@app.delete("/borrar-nota/{nota_id}")
+def borrar_nota(nota_id: int):
+    """
+    Borra una nota usando solo su ID. Estrategia: Pinecone primero, luego MySQL
+    """
+    db = get_db_connection()
+    cursor = db.cursor(dictionary=True)
+    
+    try:
+        # Buscar la nota y su pinecone_id
+        cursor.execute("SELECT id, pinecone_id FROM notas WHERE id = %s", (nota_id,))
+        nota = cursor.fetchone()
+        
+        if not nota:
+            return {"status": "error", "message": "Nota no encontrada"}
+        
+        pinecone_id = nota['pinecone_id']
+        print(f"🗑️ Borrando nota ID {nota_id}, Pinecone ID: {pinecone_id}")
+        
+        # 🎯 PASO 1: Borrar de Pinecone primero
+        if pinecone_id:
+            try:
+                index.delete(ids=[pinecone_id])
+                print(f"✅ Borrado de Pinecone: {pinecone_id}")
+            except Exception as e:
+                print(f"❌ Error borrando de Pinecone: {e}")
+                return {"status": "error", "message": f"Error en Pinecone: {str(e)}"}
+        
+        # 🎯 PASO 2: Borrar de MySQL
+        cursor.execute("DELETE FROM notas WHERE id = %s", (nota_id,))
+        db.commit()
+        
+        print(f"✅ Nota {nota_id} borrada completamente")
+        return {
+            "status": "ok", 
+            "message": "Nota borrada correctamente",
+            "nota_id": nota_id
+        }
+        
+    except Exception as e:
+        print(f"❌ Error general borrando nota {nota_id}: {e}")
+        return {"status": "error", "message": f"Error interno: {str(e)}"}
+    
+    finally:
+        cursor.close()
+        db.close()
+
+
 app.include_router(mapa_router)
+        
